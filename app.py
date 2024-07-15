@@ -1,94 +1,100 @@
 import os
-import instaloader
-import ffmpeg
-import wave
-import json
-import vosk
+import logging
 from flask import Flask, request, jsonify
-import requests
+import instaloader
+import subprocess
+import json
+from vosk import Model, KaldiRecognizer
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads/'
-app.config['TEMP_FOLDER'] = 'temp/'
-app.config['MODEL_FOLDER'] = 'vosk_model/'
 
-def extract_audio(video_path, audio_path):
-    stream = ffmpeg.input(video_path)
-    stream = ffmpeg.output(stream, audio_path)
-    ffmpeg.run(stream)
+logging.basicConfig(level=logging.DEBUG)
+logging.debug("Logging is configured correctly.")
 
-def transcribe_audio(audio_path, model_path):
-    model = vosk.Model(model_path)
-    wf = wave.open(audio_path, "rb")
+# Initialize the Instaloader instance
+L = instaloader.Instaloader()
 
-    if wf.getnchannels() != 1:
-        raise ValueError("Audio file must be mono")
-
-    recognizer = vosk.KaldiRecognizer(model, wf.getframerate())
-
-    transcription = ""
-
-    while True:
-        data = wf.readframes(4000)
-        if len(data) == 0:
-            break
-        if recognizer.AcceptWaveform(data):
-            result = json.loads(recognizer.Result())
-            transcription += result.get('text', '') + " "
-
-    final_result = json.loads(recognizer.FinalResult())
-    transcription += final_result.get('text', '')
-
-    return transcription
-
-def download_instagram_media(url, download_folder):
-    L = instaloader.Instaloader(download_videos=True, download_pictures=True)
-    post = instaloader.Post.from_shortcode(L.context, url.split("/")[-2])
-    L.download_post(post, target=download_folder)
-    caption = post.caption
-    media_path = next(
-        (os.path.join(download_folder, file) for file in os.listdir(download_folder)
-         if file.endswith(('.mp4', '.jpg', '.jpeg', '.png'))), None)
-    return caption, media_path
+# Path to Vosk model
+vosk_model_path = "vosk_model/vosk-model-small-en-us-0.15"
 
 @app.route('/process', methods=['POST'])
 def process_instagram_url():
     try:
         data = request.json
-        url = data['url']
-        
-        download_folder = os.path.join(app.config['TEMP_FOLDER'], 'download')
-        os.makedirs(download_folder, exist_ok=True)
-        
-        caption, media_path = download_instagram_media(url, download_folder)
-        
-        if media_path.endswith('.mp4'):
-            audio_path = os.path.splitext(media_path)[0] + '.wav'
-            extract_audio(media_path, audio_path)
-            transcription = transcribe_audio(audio_path, app.config['MODEL_FOLDER'])
+        instagram_url = data.get('url')
+        shortcode = instagram_url.split("/")[-2]
+        base_download_folder = "downloaded_posts"
+        download_folder = os.path.join(base_download_folder, shortcode)
+        logging.debug(f"Downloading Instagram media from {instagram_url} to {download_folder}")
+
+        # Ensure download folder exists
+        if not os.path.exists(download_folder):
+            os.makedirs(download_folder)
+
+        # Set the target folder to the base directory
+        L.dirname_pattern = download_folder
+
+        # Download Instagram media
+        logging.debug(f"Starting Instagram media download from URL: {instagram_url}")
+        post = instaloader.Post.from_shortcode(L.context, shortcode)
+        L.download_post(post, target='')
+
+        # Extract caption and media file path
+        caption = None
+        media_path = None
+        for file in os.listdir(download_folder):
+            logging.debug(f"Checking file: {file}")
+            if file.endswith('.mp4'):
+                media_path = os.path.join(download_folder, file)
+                logging.debug(f"Found media file: {media_path}")
+            if file.endswith('.txt'):
+                with open(os.path.join(download_folder, file), 'r') as caption_file:
+                    caption = caption_file.read()
+                logging.debug(f"Post caption: {caption}")
+
+        if media_path:
+            # Extract audio from video
+            audio_path = media_path.replace('.mp4', '.wav')
+            logging.debug(f"Extracting audio from {media_path} to {audio_path}")
+            command = [
+                'ffmpeg', '-y', '-i', media_path, '-vn', '-acodec', 'pcm_s16le',
+                '-ac', '1', '-ar', '44100', audio_path
+            ]
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logging.debug(f"ffmpeg stdout: {result.stdout.decode('utf-8')}")
+            logging.debug(f"ffmpeg stderr: {result.stderr.decode('utf-8')}")
+            if result.returncode != 0:
+                logging.error(f"ffmpeg failed with return code {result.returncode}")
+                raise Exception(f"ffmpeg error: {result.stderr.decode('utf-8')}")
+            logging.debug(f"Audio extraction complete: {audio_path}")
+
+            # Transcribe audio
+            transcription_path = audio_path.replace('.wav', '-transcription.txt')
+            logging.debug(f"Transcribing audio from {audio_path} using model {vosk_model_path}")
+            model = Model(vosk_model_path)
+            rec = KaldiRecognizer(model, 44100)
+
+            with open(audio_path, 'rb') as audio_file:
+                data = audio_file.read()
+                rec.AcceptWaveform(data)
+
+            result = rec.Result()
+            transcription = json.loads(result).get('text', '')
+            logging.debug(f"Transcription complete: {transcription}")
+
+            # Save transcription
+            with open(transcription_path, 'w') as transcription_file:
+                transcription_file.write(transcription)
+            logging.debug(f"Transcription saved to {transcription_path}")
+
         else:
-            transcription = "No audio to transcribe."
-        
-        result = {
-            'caption': caption,
-            'transcription': transcription
-        }
-        
-        # Placeholder for sending result to Gemini API
-        gemini_response = send_to_gemini_api(result)
-        
-        return jsonify(gemini_response)
+            logging.error("No media file found in the download folder")
+
+        return jsonify({'caption': caption, 'transcription': transcription if media_path else 'No audio to transcribe.'})
+    
     except Exception as e:
-        return jsonify({'error': str(e)})
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({'status': 'healthy'})
-
-def send_to_gemini_api(data):
-    gemini_url = "https://api.gemini.com/factcheck"  # Replace with actual Gemini API endpoint
-    response = requests.post(gemini_url, json=data)
-    return response.json()
+        logging.error(f"Error processing Instagram URL: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
