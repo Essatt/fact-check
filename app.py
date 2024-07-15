@@ -53,30 +53,33 @@ def download_instagram_media(url, download_folder):
 
 @app.route('/process', methods=['POST'])
 def process_instagram_url():
-    data = request.json
-    url = data['url']
-    
-    download_folder = os.path.join(app.config['TEMP_FOLDER'], 'download')
-    os.makedirs(download_folder, exist_ok=True)
-    
-    caption, media_path = download_instagram_media(url, download_folder)
-    
-    if media_path.endswith('.mp4'):
-        audio_path = os.path.splitext(media_path)[0] + '.wav'
-        extract_audio(media_path, audio_path)
-        transcription = transcribe_audio(audio_path, app.config['MODEL_FOLDER'])
-    else:
-        transcription = "No audio to transcribe."
-    
-    result = {
-        'caption': caption,
-        'transcription': transcription
-    }
-    
-    # Placeholder for sending result to Gemini API
-    gemini_response = send_to_gemini_api(result)
-    
-    return jsonify(gemini_response)
+    try:
+        data = request.json
+        url = data['url']
+        
+        download_folder = os.path.join(app.config['TEMP_FOLDER'], 'download')
+        os.makedirs(download_folder, exist_ok=True)
+        
+        caption, media_path = download_instagram_media(url, download_folder)
+        
+        if media_path.endswith('.mp4'):
+            audio_path = os.path.splitext(media_path)[0] + '.wav'
+            extract_audio(media_path, audio_path)
+            transcription = transcribe_audio(audio_path, app.config['MODEL_FOLDER'])
+        else:
+            transcription = "No audio to transcribe."
+        
+        result = {
+            'caption': caption,
+            'transcription': transcription
+        }
+        
+        # Placeholder for sending result to Gemini API
+        gemini_response = send_to_gemini_api(result)
+        
+        return jsonify(gemini_response)
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 def send_to_gemini_api(data):
     gemini_url = "https://api.gemini.com/factcheck"  # Replace with actual Gemini API endpoint
