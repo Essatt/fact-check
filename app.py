@@ -81,6 +81,10 @@ def process_instagram_url():
     except Exception as e:
         return jsonify({'error': str(e)})
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({'status': 'healthy'})
+
 def send_to_gemini_api(data):
     gemini_url = "https://api.gemini.com/factcheck"  # Replace with actual Gemini API endpoint
     response = requests.post(gemini_url, json=data)
